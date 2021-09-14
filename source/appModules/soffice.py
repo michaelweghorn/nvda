@@ -11,6 +11,7 @@ import appModuleHandler
 import controlTypes
 import textInfos
 import colors
+import winUser
 from compoundDocuments import CompoundDocument
 from NVDAObjects.JAB import JAB, JABTextInfo
 from NVDAObjects.IAccessible import IAccessible, IA2TextTextInfo
@@ -211,6 +212,25 @@ class SymphonyTableCell(IAccessible):
 	def _get_cellCoordsText(self):
 		return super(SymphonyTableCell,self).name
 
+	def event_selection(self):
+		print('SELECTION')
+		# reset remembered selection
+		SymphonyTable.last_selection = ()
+		# no need to announce new selection here, that's already covered by focus event handling
+		return super().event_selection()
+
+	def event_selectionRemove(self):
+		print('SELECTION_REMOVE')
+		if hasattr(self, 'table') and isinstance(self.table, SymphonyTable):
+			self.table.announce_selected_cells()
+		return super().event_selectionRemove()
+
+	def event_selectionAdd(self):
+		print('SELECTION_ADD')
+		if hasattr(self, 'table') and isinstance(self.table, SymphonyTable):
+			self.table.announce_selected_cells()
+		return super(SymphonyTableCell, self).event_selectionAdd()
+
 	name=None
 
 	def _get_states(self):
@@ -228,11 +248,67 @@ class SymphonyTableCell(IAccessible):
 
 class SymphonyTable(IAccessible):
 
+	# to remember first and last cell of last selection if multiple cells are selected
+	last_selection = ()
+
+	def announce_selected_cells(self):
+		if not hasattr(self, 'IAccessibleTable2Object'):
+			# NOTE: could add handling for older LO versions here...
+			return
+
+		# s. doc for IAccessibleTable2::selectedCells; out params are returned in tuple
+		selection = self.IAccessibleTable2Object.selectedCells
+		cells = selection[0]
+		nSelectedCellCount = selection[1]
+		# NOTE: just a temporary check to verify this actually returns the same...
+		assert(nSelectedCellCount == self.IAccessibleTable2Object.nSelectedCells)
+
+		# DEMO: announce the currently selected cells
+		# This demo just announces cell names, and assumes a contiguous range has been selected
+		if nSelectedCellCount > 1:
+			first_cell = cells[0]
+			# DEMO: query for IAccessibleTableCell interface, could be used for more...
+			first_iaTableCellObject = first_cell.QueryInterface(IA2.IAccessibleTableCell)
+			print('first_cell, indices: {}, {}'.format(first_iaTableCellObject.columnIndex, first_iaTableCellObject.rowIndex))
+			first_cell_name = first_iaTableCellObject.QueryInterface(IA2.IAccessible2).accName(winUser.CHILDID_SELF)
+
+			last_cell = cells[nSelectedCellCount - 1]
+			last_iaTableCellObject = last_cell.QueryInterface(IA2.IAccessibleTableCell)
+			print('last_cell, indices: {}, {}'.format(last_iaTableCellObject.columnIndex, last_iaTableCellObject.rowIndex))
+			last_cell_name = last_iaTableCellObject.QueryInterface(IA2.IAccessible2).accName(winUser.CHILDID_SELF)
+
+			current_selection = (first_cell_name, last_cell_name)
+
+			# only speak selection if it has changed compared to last time
+			# to avoid e.g. doing so multiple times when multiple SELECTION_ADD events are received as multiple cells are added to selection
+			if current_selection != SymphonyTable.last_selection:
+				import speech
+				speech.speakMessage('selected cells: {} to {}'.format(first_cell_name, last_cell_name))
+				SymphonyTable.last_selection = current_selection
+
+	def event_selectionWithIn(self):
+		print('SELECTION_WITHIN')
+		self.announce_selected_cells()
+		return super().event_selectionWithIn()
+
 	def getSelectedItemsCount(self,maxCount=2):
-		# #8988: Neither accSelection nor IAccessibleTable2 is implemented on the LibreOffice tables.
+		try:
+			# from LibreOffice 7.3 on, the IAccessibleTable2 interface is implemented
+			iaTableObject = self.IAccessibleObject.QueryInterface(IA2.IAccessibleTable2)
+			count = iaTableObject.nSelectedCells
+			# however, if only a single cell is focused, nSelectedCells() returns 0;
+			# returning 1 will suppress redundant selected announcements
+			if count > 0:
+				return count
+			return 1
+		except COMError:
+			pass
+
+		# #8988: Neither accSelection nor IAccessibleTable2 is implemented on the LibreOffice tables with LibreOffice versions before 7.3.
 		# Returning 1 will suppress redundant selected announcements,
 		# while having the drawback of never announcing selected for selected cells.
 		return 1
+
 
 class SymphonyParagraph(SymphonyText):
 	"""Removes redundant information that can be retreaved in other ways."""
